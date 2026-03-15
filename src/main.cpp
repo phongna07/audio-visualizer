@@ -39,6 +39,7 @@ constexpr float BAND_EQ_ALPHA = 0.022f;
 constexpr float GLOBAL_EQ_ALPHA = 0.04f;
 constexpr float MIN_EQ_MULT = 0.55f;
 constexpr float MAX_EQ_MULT = 2.20f;
+constexpr float HEIGHT_SENSITIVITY = 2.5f;
 
 struct AudioFrame {
   float samples[FFT_SAMPLES];
@@ -216,7 +217,11 @@ void taskEye(void *parameter) {
       }
 
       float compressed = log10f(1.0f + normalized) / log10f(1.0f + DISPLAY_GAIN);
-      float targetHeight = compressed * (SCREEN_HEIGHT - TOP_MARGIN - 2);
+      float targetHeight = compressed * (SCREEN_HEIGHT - TOP_MARGIN - 2) * HEIGHT_SENSITIVITY;
+      float maxHeight = (SCREEN_HEIGHT - TOP_MARGIN - 2);
+      if (targetHeight > maxHeight) {
+        targetHeight = maxHeight;
+      }
 
       if (targetHeight > smoothedBars[bar]) {
         smoothedBars[bar] = (smoothedBars[bar] * 0.45f) + (targetHeight * 0.55f);
