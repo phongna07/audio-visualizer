@@ -28,7 +28,7 @@ constexpr uint8_t SCREEN_HEIGHT = 64;
 constexpr uint16_t SAMPLE_RATE = 44100;
 constexpr uint16_t FFT_SAMPLES = 256;
 constexpr uint8_t NUM_BARS = 24;
-constexpr uint8_t TOP_MARGIN = 10;
+constexpr uint8_t TOP_MARGIN = 16;
 constexpr uint8_t VISUAL_X_OFFSET = 3;
 constexpr float DISPLAY_FLOOR = 0.006f;
 constexpr float DISPLAY_GAIN = 66.0f;
@@ -42,6 +42,12 @@ constexpr float MIN_EQ_MULT = 0.55f;
 constexpr float MAX_EQ_MULT = 2.20f;
 constexpr float HEIGHT_SENSITIVITY = 2.5f;
 
+enum class LevelState : uint8_t {
+  Quiet = 0,
+  Normal,
+  Loud,
+};
+
 struct AudioFrame {
   float samples[FFT_SAMPLES];
   uint32_t sequence;
@@ -52,8 +58,6 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C g_display(U8G2_R0, U8X8_PIN_NONE);
 
 void drawBootScreen() {
   g_display.clearBuffer();
-  g_display.setCursor(12, 16);
-  g_display.println("AI Companion");
   g_display.setCursor(8, 30);
   g_display.println("Audio Visualizer");
   g_display.drawLine(0, 46, SCREEN_WIDTH - 1, 46);
@@ -141,6 +145,17 @@ void taskEye(void *parameter) {
   float globalHistory = 0.02f;
   float shimmerOffset = 0.0f;
 
+  float fastEnergy = 0.02f;
+  float beatBaseline = 0.02f;
+  float previousEnergy = 0.02f;
+  LevelState levelState = LevelState::Normal;
+  uint32_t lastLevelTransitionMs = 0;
+  uint32_t lastBeatMs = 0;
+
+  float bassMeter = 0.0f;
+  float midMeter = 0.0f;
+  float trebleMeter = 0.0f;
+
   uint32_t lastFrameMicros = micros();
   uint16_t fps = 0;
 
@@ -168,6 +183,9 @@ void taskEye(void *parameter) {
     FFT.complexToMagnitude();
 
     float spectrumEnergy = 0.0f;
+    float bassSum = 0.0f;
+    float midSum = 0.0f;
+    float trebleSum = 0.0f;
     const int nyquistBin = (FFT_SAMPLES / 2) - 2;
     int maxUsableBin = 1 + (int)(nyquistBin * FFT_MAX_BIN_RATIO);
     if (maxUsableBin < 3) {
@@ -221,6 +239,14 @@ void taskEye(void *parameter) {
 
       spectrumEnergy += mag;
 
+      if (bar < 8) {
+        bassSum += mag;
+      } else if (bar < 16) {
+        midSum += mag;
+      } else {
+        trebleSum += mag;
+      }
+
       float normalized = (mag - DISPLAY_FLOOR) * DISPLAY_GAIN;
       if (normalized < 0.0f) {
         normalized = 0.0f;
@@ -249,6 +275,62 @@ void taskEye(void *parameter) {
     float frameMeanEnergy = spectrumEnergy / NUM_BARS;
     globalHistory = (globalHistory * (1.0f - GLOBAL_EQ_ALPHA)) + (frameMeanEnergy * GLOBAL_EQ_ALPHA);
 
+    fastEnergy = (fastEnergy * 0.72f) + (frameMeanEnergy * 0.28f);
+    beatBaseline = (beatBaseline * 0.93f) + (frameMeanEnergy * 0.07f);
+
+    bassMeter = (bassMeter * 0.70f) + (((bassSum / 8.0f) / (globalHistory + 0.0001f)) * 0.30f);
+    midMeter = (midMeter * 0.70f) + (((midSum / 8.0f) / (globalHistory + 0.0001f)) * 0.30f);
+    trebleMeter = (trebleMeter * 0.70f) + (((trebleSum / 8.0f) / (globalHistory + 0.0001f)) * 0.30f);
+
+    if (bassMeter > 2.2f) {
+      bassMeter = 2.2f;
+    }
+    if (midMeter > 2.2f) {
+      midMeter = 2.2f;
+    }
+    if (trebleMeter > 2.2f) {
+      trebleMeter = 2.2f;
+    }
+
+    const uint32_t nowMs = millis();
+    if ((nowMs - lastLevelTransitionMs) > 180) {
+      const float quietEnter = 0.82f;
+      const float quietExit = 0.90f;
+      const float loudEnter = 1.38f;
+      const float loudExit = 1.24f;
+      float energyRatio = fastEnergy / (globalHistory + 0.0001f);
+
+      if (levelState == LevelState::Quiet) {
+        if (energyRatio > quietExit) {
+          levelState = LevelState::Normal;
+          lastLevelTransitionMs = nowMs;
+        }
+      } else if (levelState == LevelState::Normal) {
+        if (energyRatio < quietEnter) {
+          levelState = LevelState::Quiet;
+          lastLevelTransitionMs = nowMs;
+        } else if (energyRatio > loudEnter) {
+          levelState = LevelState::Loud;
+          lastLevelTransitionMs = nowMs;
+        }
+      } else {
+        if (energyRatio < loudExit) {
+          levelState = LevelState::Normal;
+          lastLevelTransitionMs = nowMs;
+        }
+      }
+    }
+
+    bool beatTriggered = false;
+    float energyRise = frameMeanEnergy - beatBaseline;
+    float energyDelta = frameMeanEnergy - previousEnergy;
+    float beatThreshold = fmaxf(0.0032f, beatBaseline * 0.48f);
+    if ((energyRise > beatThreshold) && (energyDelta > 0.0016f) && ((nowMs - lastBeatMs) > 210)) {
+      beatTriggered = true;
+      lastBeatMs = nowMs;
+    }
+    previousEnergy = frameMeanEnergy;
+
     uint32_t now = micros();
     uint32_t frameMicros = now - lastFrameMicros;
     lastFrameMicros = now;
@@ -262,6 +344,65 @@ void taskEye(void *parameter) {
     }
 
     g_display.clearBuffer();
+
+    const char levelChar =
+        (levelState == LevelState::Quiet) ? '1' : (levelState == LevelState::Loud) ? '3' : '2';
+
+    g_display.setCursor(VISUAL_X_OFFSET, 0);
+    g_display.print("LV ");
+    g_display.print(levelChar);
+
+    g_display.setCursor(SCREEN_WIDTH - 32 - VISUAL_X_OFFSET, 0);
+    g_display.print(fps);
+    g_display.print("fps");
+
+    uint8_t pulseRadius = 0;
+    uint32_t beatAge = nowMs - lastBeatMs;
+    if (beatTriggered || beatAge < 170) {
+      if (beatAge < 55) {
+        pulseRadius = 2;
+      } else if (beatAge < 110) {
+        pulseRadius = 1;
+      } else {
+        pulseRadius = 0;
+      }
+    }
+    int pulseX = SCREEN_WIDTH - 6;
+    int pulseY = 3;
+    if (pulseRadius >= 2) {
+      g_display.drawDisc(pulseX, pulseY, 2, U8G2_DRAW_ALL);
+    } else if (pulseRadius == 1) {
+      g_display.drawCircle(pulseX, pulseY, 2, U8G2_DRAW_ALL);
+    } else {
+      g_display.drawPixel(pulseX, pulseY);
+    }
+
+    const int meterY = 8;
+    const int meterW = 36;
+    const int meterH = 4;
+    const int meterSpacing = 42;
+    const float meterScale = 2.2f;
+
+    const char meterLabels[3] = {'B', 'M', 'T'};
+    float meterValues[3] = {bassMeter, midMeter, trebleMeter};
+    for (uint8_t m = 0; m < 3; ++m) {
+      int x = 2 + (m * meterSpacing);
+      int valueW = (int)((meterValues[m] / meterScale) * (meterW - 2));
+      if (valueW < 0) {
+        valueW = 0;
+      }
+      if (valueW > (meterW - 2)) {
+        valueW = meterW - 2;
+      }
+
+      g_display.drawFrame(x + 5, meterY, meterW, meterH);
+      if (valueW > 0) {
+        g_display.drawBox(x + 6, meterY + 1, valueW, meterH - 2);
+      }
+
+      g_display.setCursor(x, meterY - 1);
+      g_display.print(meterLabels[m]);
+    }
 
     int baseline = SCREEN_HEIGHT - 1;
     int drawableWidth = SCREEN_WIDTH - VISUAL_X_OFFSET;
@@ -282,26 +423,18 @@ void taskEye(void *parameter) {
       }
       g_display.drawLine(x, capY, x + barW - 2, capY);
 
-      int ghostHeight = (int)(h * 0.35f);
-      g_display.setDrawColor(0);
-      for (int gy = 0; gy < ghostHeight; gy += 3) {
-        int px = x + ((bar & 1U) ? 1 : 0);
-        int py = baseline - h + gy;
-        if (py >= TOP_MARGIN && py < SCREEN_HEIGHT) {
-          g_display.drawPixel(px, py);
+      float shimmerPhase = sinf(shimmerOffset + (bar * 0.34f));
+      if (shimmerPhase > 0.45f) {
+        int accentY = capY - 1;
+        if (accentY >= TOP_MARGIN) {
+          g_display.drawPixel(x + ((barW > 2) ? 1 : 0), accentY);
+          if (barW > 3) {
+            g_display.drawPixel(x + barW - 2, accentY);
+          }
         }
       }
-      g_display.setDrawColor(1);
+
     }
-
-
-    g_display.setCursor(VISUAL_X_OFFSET, 0);
-    g_display.print("FFT ");
-    g_display.print(FFT_SAMPLES);
-    g_display.print("  ");
-    g_display.print(fps);
-    g_display.print("fps");
-
     g_display.sendBuffer();
 
     vTaskDelayUntil(&nextWake, pdMS_TO_TICKS(25));
