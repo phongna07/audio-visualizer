@@ -33,6 +33,7 @@ constexpr uint8_t VISUAL_X_OFFSET = 3;
 constexpr float DISPLAY_FLOOR = 0.006f;
 constexpr float DISPLAY_GAIN = 66.0f;
 constexpr float BAR_DISTRIBUTION_EXP = 1.08f;
+constexpr float FFT_MAX_BIN_RATIO = 0.42f;
 constexpr float HIGH_BAND_BOOST_BASE = 0.92f;
 constexpr float HIGH_BAND_BOOST_RANGE = 0.95f;
 constexpr float BAND_EQ_ALPHA = 0.022f;
@@ -167,16 +168,25 @@ void taskEye(void *parameter) {
     FFT.complexToMagnitude();
 
     float spectrumEnergy = 0.0f;
+    const int nyquistBin = (FFT_SAMPLES / 2) - 2;
+    int maxUsableBin = 1 + (int)(nyquistBin * FFT_MAX_BIN_RATIO);
+    if (maxUsableBin < 3) {
+      maxUsableBin = 3;
+    }
+    const int usableSpan = maxUsableBin - 1;
 
     for (uint8_t bar = 0; bar < NUM_BARS; ++bar) {
       float ratioStart = (float)bar / NUM_BARS;
       float ratioEnd = (float)(bar + 1) / NUM_BARS;
 
-      int startBin = 1 + (int)(powf(ratioStart, BAR_DISTRIBUTION_EXP) * ((FFT_SAMPLES / 2) - 2));
-      int endBin = 1 + (int)(powf(ratioEnd, BAR_DISTRIBUTION_EXP) * ((FFT_SAMPLES / 2) - 2));
+      int startBin = 1 + (int)(powf(ratioStart, BAR_DISTRIBUTION_EXP) * usableSpan);
+      int endBin = 1 + (int)(powf(ratioEnd, BAR_DISTRIBUTION_EXP) * usableSpan);
 
       if (endBin <= startBin) {
         endBin = startBin + 1;
+      }
+      if (endBin > maxUsableBin) {
+        endBin = maxUsableBin;
       }
 
       float sum = 0.0f;
