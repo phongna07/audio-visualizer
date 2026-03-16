@@ -17,7 +17,7 @@
 // Use I2S processor 0
 #define I2S_PORT I2S_NUM_0
 
-// OLED configuration (SSD1306 128x64 over I2C)
+// OLED configuration (128x64 over I2C)
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t OLED_SDA = 21;
 constexpr uint8_t OLED_SCL = 22;
@@ -54,7 +54,7 @@ struct AudioFrame {
 };
 
 QueueHandle_t g_audioFrameQueue = nullptr;
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C g_display(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SH1106_128X64_NONAME_F_HW_I2C g_display(U8G2_R0, U8X8_PIN_NONE);
 
 void drawBootScreen() {
   g_display.clearBuffer();
